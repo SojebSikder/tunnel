@@ -21,7 +21,8 @@ tunnel tunnel --url http://localhost:4000 --host http://localhost:7000
 
 - `start-server` - start the tunnel server
 - `tunnel` - start the client,
-  - `--url` flag for speicify the client app url -`--host` to speicify the tunnel server host address
+  - `--url` flag for speicify the client app url
+  - `--host` to speicify the tunnel server host address
 
 ## Tests
 
