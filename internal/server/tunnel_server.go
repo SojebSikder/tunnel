@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{}
-var clientConn *websocket.Conn
+
+var clients = make(map[string]*websocket.Conn)
 
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -17,12 +19,24 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to upgrade to WebSocket", http.StatusInternalServerError)
 		return
 	}
-	fmt.Println("Client connected")
-	clientConn = conn
+
+	var reg map[string]interface{}
+	if err := conn.ReadJSON(&reg); err != nil || reg["type"] != "register" {
+		conn.Close()
+		return
+	}
+
+	subdomain := reg["subdomain"].(string)
+	clients[subdomain] = conn
+	fmt.Printf("Client registered with subdomain: %s\n", subdomain)
 }
 
 func HandlePublicRequest(w http.ResponseWriter, r *http.Request) {
-	if clientConn == nil {
+	host := r.Host // e.g., app1.tunnel.com
+	subdomain := strings.Split(host, ".")[0]
+
+	conn, ok := clients[subdomain]
+	if !ok {
 		http.Error(w, "Tunnel not connected", http.StatusBadGateway)
 		return
 	}
@@ -38,11 +52,10 @@ func HandlePublicRequest(w http.ResponseWriter, r *http.Request) {
 		"headers": r.Header,
 		"body":    string(body),
 	}
-	clientConn.WriteJSON(req)
+	conn.WriteJSON(req)
 
-	// Wait for response
 	var resp map[string]interface{}
-	clientConn.ReadJSON(&resp)
+	conn.ReadJSON(&resp)
 
 	statusCode := 502
 	if raw, ok := resp["status"]; ok {
