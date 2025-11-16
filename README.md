@@ -12,17 +12,10 @@ Ngrok like tunneling system created using Go.
 
 ```bash
 # start tunnel server
-tunnel start-server --port 7000
+tunnel -mode=server -listen=:8080
 # start the client
-tunnel tunnel --url http://localhost:4000 --host http://localhost:7000
+tunnel -mode=agent -server=ws://localhost:8080/ws -url=http://localhost:3000 -subdomain=demo
 ```
-
-## Supported commands
-
-- `start-server` - start the tunnel server
-- `tunnel` - start the client,
-  - `--url` flag for speicify the client app url
-  - `--host` to speicify the tunnel server host address
 
 ## Tests
 

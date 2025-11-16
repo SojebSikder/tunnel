@@ -1,45 +1,30 @@
 package main
 
 import (
-	"fmt"
-	"os"
+	"flag"
+	"log"
+	"net/http"
 
-	"github.com/sojebsikder/tunnel/cmd"
+	"github.com/sojebsikder/tunnel/internal/client"
+	"github.com/sojebsikder/tunnel/internal/server"
 )
 
-var version = "0.0.1"
-var appName = "tunnel"
-
-func showUsage() {
-	fmt.Printf("Usage:\n")
-	fmt.Printf("  %s start-server\n\n", appName)
-	fmt.Printf("  %s tunnel [--url] [--host]\n\n", appName)
-	fmt.Printf("  %s help\n", appName)
-	fmt.Printf("  %s version\n", appName)
-}
-
 func main() {
-	if len(os.Args) < 2 {
-		showUsage()
-		return
+	mode := flag.String("mode", "server", "server or agent")
+	listen := flag.String("listen", ":8080", "listen address")
+	serverURL := flag.String("server", "ws://localhost:8080/ws", "server url")
+	localURL := flag.String("url", "http://localhost:3000", "local app url")
+	sub := flag.String("subdomain", "demo", "subdomain")
+	flag.Parse()
+
+	if *mode == "server" {
+		b := server.NewBroker()
+		http.HandleFunc("/ws", b.HandleWS)
+		http.HandleFunc("/", b.HandlePublic)
+		log.Println("server listening on", *listen)
+		log.Fatal(http.ListenAndServe(*listen, nil))
 	}
 
-	cmdName := os.Args[1]
-
-	switch cmdName {
-	case "start-server":
-		cmd.StartServer(os.Args[2:])
-
-	case "tunnel":
-		cmd.StartClient(os.Args[2:])
-
-	case "help":
-		showUsage()
-	case "version":
-		fmt.Printf("%s %s \n", version, appName)
-	default:
-		fmt.Println("Unknown command:", cmdName)
-		fmt.Printf("Use '%s help' to see available commands.\n", version)
-		os.Exit(1)
-	}
+	log.Println("agent starting:", *serverURL, *localURL, *sub)
+	client.RunAgent(*serverURL, *localURL, *sub)
 }
