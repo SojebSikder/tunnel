@@ -23,11 +23,6 @@ const (
 )
 
 func main() {
-	listen := flag.String("listen", ":8080", "listen address")
-
-	serverURL := flag.String("server", "localhost:8080", "server address")
-	localURL := flag.String("url", "http://localhost:3000", "local app url")
-	sub := flag.String("subdomain", "demo", "subdomain")
 	flag.Parse()
 
 	args := flag.Args()
@@ -40,6 +35,11 @@ func main() {
 			fmt.Printf("(c) sojebsikder <sojebsikder@gmail.com>\n\n")
 			flag.Usage()
 		case "start-server":
+			serverCmd := flag.NewFlagSet("start-server", flag.ExitOnError)
+			listen := serverCmd.String("listen", ":8080", "listen address")
+			publicAddr := serverCmd.String("public", ":80", "HTTP listen address for public traffic")
+			serverCmd.Parse(os.Args[2:])
+
 			b := server.NewBroker()
 
 			// Start QUIC server for agents in a goroutine
@@ -49,10 +49,16 @@ func main() {
 			}()
 
 			// Start HTTP server for public traffic
+			log.Println("HTTP server listening for public on", *publicAddr)
 			http.HandleFunc("/", b.HandlePublic)
-			log.Println("HTTP server listening for public on :80") // Or another port
-			log.Fatal(http.ListenAndServe(":80", nil))
+			log.Fatal(http.ListenAndServe(*publicAddr, nil))
 		case "start-agent":
+			agentCmd := flag.NewFlagSet("start-agent", flag.ExitOnError)
+			serverURL := agentCmd.String("server", "localhost:8080", "server address")
+			localURL := agentCmd.String("url", "http://localhost:3000", "local app url")
+			sub := agentCmd.String("subdomain", "demo", "subdomain")
+			agentCmd.Parse(os.Args[2:])
+
 			log.Println("agent starting:", *serverURL, *localURL, *sub)
 			client.RunAgent(*serverURL, *localURL, *sub)
 		default:
