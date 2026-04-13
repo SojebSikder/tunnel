@@ -68,7 +68,7 @@ func RunAgent(serverAddr, localURL, subdomain string) {
 				break
 			}
 
-			// handle each stream in a new goroutine for true multiplexing
+			// handle stream
 			go handleRequestStream(stream, localURL)
 		}
 

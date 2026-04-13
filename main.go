@@ -42,7 +42,7 @@ func main() {
 
 			b := server.NewBroker()
 
-			// Start QUIC server for agents in a goroutine
+			// Start QUIC server for agents
 			go func() {
 				log.Println("QUIC server listening for agents on", *listen)
 				b.StartQUICServer(*listen, generateTLSConfig())
