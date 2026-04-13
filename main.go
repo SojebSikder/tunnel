@@ -7,16 +7,22 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 
 	"github.com/sojebsikder/tunnel/internal/client"
 	"github.com/sojebsikder/tunnel/internal/server"
 )
 
+const (
+	appName = "Stunnel"
+	version = "0.0.2"
+)
+
 func main() {
-	mode := flag.String("mode", "server", "server or agent")
 	listen := flag.String("listen", ":8080", "listen address")
 
 	serverURL := flag.String("server", "localhost:8080", "server address")
@@ -24,22 +30,36 @@ func main() {
 	sub := flag.String("subdomain", "demo", "subdomain")
 	flag.Parse()
 
-	if *mode == "server" {
-		b := server.NewBroker()
+	args := flag.Args()
+	if len(args) > 0 {
+		switch args[0] {
+		case "version":
+			fmt.Printf("%s version: %s\n", appName, version)
+		case "help":
+			fmt.Printf("%s is a tunneling tool.\n\n", appName)
+			fmt.Printf("(c) sojebsikder <sojebsikder@gmail.com>\n\n")
+			flag.Usage()
+		case "start-server":
+			b := server.NewBroker()
 
-		// Start QUIC server for agents in a goroutine
-		go func() {
-			log.Println("QUIC server listening for agents on", *listen)
-			b.StartQUICServer(*listen, generateTLSConfig())
-		}()
+			// Start QUIC server for agents in a goroutine
+			go func() {
+				log.Println("QUIC server listening for agents on", *listen)
+				b.StartQUICServer(*listen, generateTLSConfig())
+			}()
 
-		// Start HTTP server for public traffic
-		http.HandleFunc("/", b.HandlePublic)
-		log.Println("HTTP server listening for public on :80") // Or another port
-		log.Fatal(http.ListenAndServe(":80", nil))
-	} else {
-		log.Println("agent starting:", *serverURL, *localURL, *sub)
-		client.RunAgent(*serverURL, *localURL, *sub)
+			// Start HTTP server for public traffic
+			http.HandleFunc("/", b.HandlePublic)
+			log.Println("HTTP server listening for public on :80") // Or another port
+			log.Fatal(http.ListenAndServe(":80", nil))
+		case "start-agent":
+			log.Println("agent starting:", *serverURL, *localURL, *sub)
+			client.RunAgent(*serverURL, *localURL, *sub)
+		default:
+			fmt.Printf("Unknown command: %s\n", args[0])
+			fmt.Println("Available commands: download")
+			os.Exit(1)
+		}
 	}
 }
 
