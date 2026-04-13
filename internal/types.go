@@ -14,7 +14,4 @@ type Message struct {
 	Status  int                 `json:"status,omitempty"`
 }
 
-const (
-	PongWait   = 60 * time.Second
-	PingPeriod = (PongWait * 9) / 10
-)
+const IdleTimeout = 60 * time.Second

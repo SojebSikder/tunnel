@@ -1,135 +1,148 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log"
-	"math"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/quic-go/quic-go"
 	"github.com/sojebsikder/tunnel/internal"
 )
 
-// parseURL parses the server URL and returns the host
-func parseURL(serverURL string) string {
-	u, err := url.Parse(serverURL)
-	if err != nil {
-		log.Fatalf("failed to parse server URL: %v", err)
+func RunAgent(serverAddr, localURL, subdomain string) {
+	// NextProtos must match the server side
+	tlsConf := &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"quic-tunnel-proto"},
 	}
-	return u.Host
-}
 
-func RunAgent(serverURL, localURL, subdomain string) {
-	backoff := 1.0
+	quicConf := &quic.Config{
+		MaxIdleTimeout:  internal.IdleTimeout,
+		KeepAlivePeriod: 10 * time.Second,
+	}
 
 	for {
-		log.Println("connecting to server:", serverURL)
+		log.Printf("Connecting to QUIC server at %s...", serverAddr)
 
-		dialer := websocket.Dialer{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-
-		conn, _, err := dialer.Dial(serverURL, http.Header{
-			// "Authorization": []string{"Bearer " + token},
-		})
+		ctx := context.Background()
+		conn, err := quic.DialAddr(ctx, serverAddr, tlsConf, quicConf)
 		if err != nil {
-			wait := time.Duration(math.Min(30, backoff)) * time.Second
-			backoff *= 1.5
-			time.Sleep(wait)
+			log.Printf("Dial failed: %v. Retrying in 5s...", err)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		backoff = 1.0
+		log.Printf("Connected! Registering subdomain: %s", subdomain)
 
-		host := parseURL(serverURL)
-		log.Println("connected to server:", serverURL)
+		// open a control stream to register the subdomain
+		regStream, err := conn.OpenStreamSync(ctx)
+		if err != nil {
+			conn.CloseWithError(0, "failed to open reg stream")
+			continue
+		}
 
-		// Send register
-		conn.WriteJSON(internal.Message{Type: "register", Path: subdomain})
-		log.Printf("registered to server: %s.%s", subdomain, host)
+		regMsg := internal.Message{
+			Type: "register",
+			Path: subdomain,
+		}
 
-		send := make(chan internal.Message, 128)
-		done := make(chan struct{})
+		if err := json.NewEncoder(regStream).Encode(regMsg); err != nil {
+			log.Printf("Registration failed: %v", err)
+			regStream.Close()
+			continue
+		}
+		regStream.Close()
 
-		// Writer
-		go func() {
-			ticker := time.NewTicker(internal.PingPeriod)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case msg := <-send:
-					if err := conn.WriteJSON(msg); err != nil {
-						conn.Close()
-						close(done)
-						return
-					}
-				case <-ticker.C:
-					if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-						conn.Close()
-						close(done)
-						return
-					}
-				}
+		// accept incoming streams from the server
+		// each stream represents one HTTP request from the public internet
+		for {
+			stream, err := conn.AcceptStream(ctx)
+			if err != nil {
+				log.Printf("Connection lost: %v", err)
+				break
 			}
-		}()
 
-		// Reader
-		go func() {
-			defer close(done)
-			for {
-				var msg internal.Message
-				if err := conn.ReadJSON(&msg); err != nil {
-					return
-				}
-				if msg.Type == "request" {
-					go handleAgentRequest(localURL, msg, send)
-				}
-			}
-		}()
+			// handle each stream in a new goroutine for true multiplexing
+			go handleRequestStream(stream, localURL)
+		}
 
-		<-done
-		conn.Close()
+		conn.CloseWithError(0, "reconnecting")
 	}
 }
 
-func handleAgentRequest(localURL string, msg internal.Message, send chan internal.Message) {
-	url := strings.TrimRight(localURL, "/") + msg.Path
+func handleRequestStream(stream *quic.Stream, localURL string) {
+	defer stream.Close()
 
-	var body []byte
-	if msg.BodyB64 != "" {
-		body, _ = base64.StdEncoding.DecodeString(msg.BodyB64)
+	// read the request message from the server
+	var msg internal.Message
+	decoder := json.NewDecoder(stream)
+	if err := decoder.Decode(&msg); err != nil {
+		log.Printf("Failed to decode request from stream: %v", err)
+		return
 	}
 
-	req, _ := http.NewRequest(msg.Method, url, io.NopCloser(strings.NewReader(string(body))))
-	req.ContentLength = int64(len(body))
+	if msg.Type != "request" {
+		return
+	}
 
+	// forward the request to the local server
+	targetURL := strings.TrimRight(localURL, "/") + msg.Path
+
+	var bodyReader io.Reader
+	if msg.BodyB64 != "" {
+		body, _ := base64.StdEncoding.DecodeString(msg.BodyB64)
+		bodyReader = strings.NewReader(string(body))
+	}
+
+	req, err := http.NewRequest(msg.Method, targetURL, bodyReader)
+	if err != nil {
+		sendErrorResponse(stream, msg.ID, 500)
+		return
+	}
+
+	// copy headers
 	for k, v := range msg.Headers {
 		for _, vv := range v {
 			req.Header.Add(k, vv)
 		}
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		send <- internal.Message{ID: msg.ID, Type: "response", Status: 502}
+		log.Printf("Local request failed: %v", err)
+		sendErrorResponse(stream, msg.ID, 502)
 		return
 	}
 	defer resp.Body.Close()
 
+	// prepare and send the response back over the same stream
 	respBody, _ := io.ReadAll(resp.Body)
 
-	send <- internal.Message{
+	respMsg := internal.Message{
 		ID:      msg.ID,
 		Type:    "response",
 		Status:  resp.StatusCode,
 		Headers: resp.Header,
 		BodyB64: base64.StdEncoding.EncodeToString(respBody),
 	}
+
+	if err := json.NewEncoder(stream).Encode(respMsg); err != nil {
+		log.Printf("Failed to send response back to server: %v", err)
+	}
+}
+
+func sendErrorResponse(stream *quic.Stream, id string, status int) {
+	errResp := internal.Message{
+		ID:     id,
+		Type:   "response",
+		Status: status,
+	}
+	json.NewEncoder(stream).Encode(errResp)
 }
