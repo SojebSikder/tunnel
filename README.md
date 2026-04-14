@@ -22,4 +22,4 @@ tunnel start-agent -server=localhost:8080 -url=localhost:5432 -tcp -remote-port=
 ## Features
 - [x] HTTP tunneling
 - [x] TCP tunneling
-- [x] dynamic subdomain
+- [x] Dynamic subdomain

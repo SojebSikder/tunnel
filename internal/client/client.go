@@ -91,7 +91,6 @@ func RunAgent(agentConfig AgentConfig) {
 				go handleRequestStream(stream, agentConfig.LocalURL)
 			}
 		}
-
 		conn.CloseWithError(0, "reconnecting")
 	}
 }
