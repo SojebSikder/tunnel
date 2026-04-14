@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -15,7 +16,20 @@ import (
 	"github.com/sojebsikder/tunnel/internal"
 )
 
-func RunAgent(serverAddr, localURL, subdomain string) {
+type AgentConfig struct {
+	// Server address to connect to
+	ServerAddr string
+	// Local URL to forward requests to
+	LocalURL string
+	// Subdomain to register with the server
+	Subdomain string
+	// for TCP port forwarding
+	TCPPort string
+	IsTCP   bool
+}
+
+// func RunAgent(serverAddr, localURL, subdomain, tcpPort string) {
+func RunAgent(agentConfig AgentConfig) {
 	// NextProtos must match the server side
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
@@ -28,17 +42,17 @@ func RunAgent(serverAddr, localURL, subdomain string) {
 	}
 
 	for {
-		log.Printf("Connecting to QUIC server at %s...", serverAddr)
+		log.Printf("Connecting to QUIC server at %s...", agentConfig.ServerAddr)
 
 		ctx := context.Background()
-		conn, err := quic.DialAddr(ctx, serverAddr, tlsConf, quicConf)
+		conn, err := quic.DialAddr(ctx, agentConfig.ServerAddr, tlsConf, quicConf)
 		if err != nil {
 			log.Printf("Dial failed: %v. Retrying in 5s...", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		log.Printf("Connected! Registering subdomain: %s", subdomain)
+		log.Printf("Connected! Registering subdomain: %s", agentConfig.Subdomain)
 
 		// open a control stream to register the subdomain
 		regStream, err := conn.OpenStreamSync(ctx)
@@ -48,8 +62,9 @@ func RunAgent(serverAddr, localURL, subdomain string) {
 		}
 
 		regMsg := internal.Message{
-			Type: "register",
-			Path: subdomain,
+			Type:    "register",
+			Path:    agentConfig.Subdomain,
+			TCPPort: agentConfig.TCPPort,
 		}
 
 		if err := json.NewEncoder(regStream).Encode(regMsg); err != nil {
@@ -68,8 +83,13 @@ func RunAgent(serverAddr, localURL, subdomain string) {
 				break
 			}
 
-			// handle stream
-			go handleRequestStream(stream, localURL)
+			if agentConfig.IsTCP {
+				// handle TCP stream
+				go handleTCPStream(stream, agentConfig.LocalURL)
+			} else {
+				// handle HTTP request
+				go handleRequestStream(stream, agentConfig.LocalURL)
+			}
 		}
 
 		conn.CloseWithError(0, "reconnecting")
@@ -145,4 +165,31 @@ func sendErrorResponse(stream *quic.Stream, id string, status int) {
 		Status: status,
 	}
 	json.NewEncoder(stream).Encode(errResp)
+}
+
+// handle TCP stream
+func handleTCPStream(stream *quic.Stream, localAddr string) {
+	defer stream.Close()
+
+	// connect to the local TCP server
+	conn, err := net.Dial("tcp", localAddr)
+	if err != nil {
+		log.Printf("Failed to connect to local TCP server: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// bidirectional copy between the QUIC stream and the local TCP server
+	done := make(chan struct{})
+	go func() {
+		io.Copy(conn, stream)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(stream, conn)
+		done <- struct{}{}
+	}()
+
+	// wait for one goroutine to finish
+	<-done
 }

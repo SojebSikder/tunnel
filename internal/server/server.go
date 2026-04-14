@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,6 +16,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/quic-go/quic-go"
 	"github.com/sojebsikder/tunnel/internal"
+)
+
+const (
+	AllowedMinPort = 5000
+	AllowedMaxPort = 6000
 )
 
 type Broker struct {
@@ -39,7 +46,7 @@ func (b *Broker) HandlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// open a new stream fir this specific request
+	// open a new stream for this specific request
 	stream, err := conn.OpenStreamSync(context.Background())
 	if err != nil {
 		http.Error(w, "Failed to open stream", 502)
@@ -78,7 +85,11 @@ func (b *Broker) HandlePublic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *Broker) StartQUICServer(addr string, tlsConfig *tls.Config) {
-	listener, _ := quic.ListenAddr(addr, tlsConfig, &quic.Config{MaxIdleTimeout: internal.IdleTimeout})
+	listener, err := quic.ListenAddr(addr, tlsConfig, &quic.Config{MaxIdleTimeout: internal.IdleTimeout})
+	if err != nil {
+		log.Fatalf("Failed to start QUIC listener: %v", err)
+	}
+
 	for {
 		conn, _ := listener.Accept(context.Background())
 		go b.handleAgentConn(conn)
@@ -91,8 +102,53 @@ func (b *Broker) handleAgentConn(conn *quic.Conn) {
 	var reg internal.Message
 	json.NewDecoder(stream).Decode(&reg)
 
+	if reg.TCPPort != "" {
+		var port int
+		fmt.Sscanf(reg.TCPPort, ":%d", &port) // extract port from ":<port>"
+
+		if port < AllowedMinPort || port > AllowedMaxPort {
+			log.Printf("Agent %s requested forbidden port: %d", reg.Path, port)
+			conn.CloseWithError(0x02, "Port not allowed")
+			return
+		}
+	}
+
 	b.mu.Lock()
 	b.agents[reg.Path] = conn
 	b.mu.Unlock()
 	log.Println("Agent registered:", reg.Path)
+
+	if reg.TCPPort != "" {
+		go b.StartTCPProxy(reg.TCPPort, reg.Path)
+	}
+}
+
+// handle TCP proxy
+func (b *Broker) StartTCPProxy(port string, subdomain string) {
+	listener, _ := net.Listen("tcp", port)
+	log.Printf("TCP Proxy listener on %s for agent %s", port, subdomain)
+
+	for {
+		conn, _ := listener.Accept()
+
+		b.mu.RLock()
+		agentConn, ok := b.agents[subdomain]
+		b.mu.RUnlock()
+
+		if !ok {
+			conn.Close()
+			continue
+		}
+
+		// open a raw QUIC stream for TCP connection
+		stream, _ := agentConn.OpenStreamSync(context.Background())
+
+		// bidirectional copy between TCP and QUIC streams
+		go func() {
+			defer stream.Close()
+			defer conn.Close()
+			go io.Copy(stream, conn)
+			io.Copy(conn, stream)
+		}()
+	}
 }

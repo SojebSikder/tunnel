@@ -19,13 +19,18 @@ import (
 
 const (
 	appName = "Stunnel"
-	version = "0.0.2"
+	version = "0.0.3"
 )
 
 func main() {
 	flag.Parse()
 
 	args := flag.Args()
+	if len(args) == 0 {
+		flag.Usage()
+		return
+	}
+
 	if len(args) > 0 {
 		switch args[0] {
 		case "version":
@@ -36,7 +41,7 @@ func main() {
 			flag.Usage()
 		case "start-server":
 			serverCmd := flag.NewFlagSet("start-server", flag.ExitOnError)
-			listen := serverCmd.String("listen", ":8080", "listen address")
+			listen := serverCmd.String("listen", ":8080", "QUIC listen address for agents")
 			publicAddr := serverCmd.String("public", ":80", "HTTP listen address for public traffic")
 			serverCmd.Parse(os.Args[2:])
 
@@ -57,10 +62,25 @@ func main() {
 			serverURL := agentCmd.String("server", "localhost:8080", "server address")
 			localURL := agentCmd.String("url", "http://localhost:3000", "local app url")
 			sub := agentCmd.String("subdomain", "demo", "subdomain")
+
+			// TCP specific flags
+			isTCP := agentCmd.Bool("tcp", false, "Enable raw TCP mode")
+			remotePort := agentCmd.String("remote-port", "", "Remote port to open an server")
+
 			agentCmd.Parse(os.Args[2:])
 
+			if *isTCP && *remotePort == "" {
+				log.Fatal("Error: -remote-port is required when using -tcp mode")
+			}
+
 			log.Println("agent starting:", *serverURL, *localURL, *sub)
-			client.RunAgent(*serverURL, *localURL, *sub)
+			client.RunAgent(client.AgentConfig{
+				ServerAddr: *serverURL,
+				LocalURL:   *localURL,
+				Subdomain:  *sub,
+				TCPPort:    *remotePort,
+				IsTCP:      *isTCP,
+			})
 		default:
 			fmt.Printf("Unknown command: %s\n", args[0])
 			fmt.Println("Available commands: download")
